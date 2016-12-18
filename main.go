@@ -142,7 +142,6 @@ func main() {
 		j := i + int(rand.Float64()*float64(size-i))
 		randomPatterns[i], randomPatterns[j] = randomPatterns[j], randomPatterns[i]
 	}
-	//net.TrainAutoEncoder(randomPatterns, 10, 0.1, 0.6, 0.4, false)
 	net.TrainQuant(randomPatterns, 10, 0.6, 0.4, false, quantization)
 
 	type Stat struct {
