@@ -28,7 +28,7 @@ const (
 	blockSize    = 4
 	netWidth     = blockSize * blockSize
 	hiddens      = netWidth / 4
-	quantization = 3
+	quantization = 4
 	scale        = 1
 )
 
@@ -112,7 +112,7 @@ func main() {
 		log.Fatal(err)
 	}
 
-	err = jpeg.Encode(file, input, &jpeg.Options{Quality: 30})
+	err = jpeg.Encode(file, input, &jpeg.Options{Quality: 45})
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -142,7 +142,8 @@ func main() {
 		j := i + int(rand.Float64()*float64(size-i))
 		randomPatterns[i], randomPatterns[j] = randomPatterns[j], randomPatterns[i]
 	}
-	net.TrainAutoEncoder(randomPatterns, 10, 0.1, 0.6, 0.4, false)
+	//net.TrainAutoEncoder(randomPatterns, 10, 0.1, 0.6, 0.4, false)
+	net.TrainQuant(randomPatterns, 10, 0.6, 0.4, false, quantization)
 
 	type Stat struct {
 		sum, min, max float32
@@ -186,7 +187,7 @@ func main() {
 	}
 	fmt.Println(stats)
 
-	file, err = os.Create(name + "_coded.png")
+	file, err = os.Create(name + "_autocoded.png")
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -210,20 +211,20 @@ func main() {
 			net.Update(pattern[0])
 			for k, act := range net.HiddenActivations[:hiddens] {
 				min, max := stats[k].min, stats[k].max
-				output[k][c] = uint8(255*(act-min)/(max-min)) >> quantization
+				output[k][c] = uint8(255 * (act - min) / (max - min))
 			}
 
 			c++
 		}
 	}
 
-	totalUncompressed, totalCompressed := 0, 0
 	for i, set := range output {
 		cwidth, cheight := width/blockSize, height/blockSize
 		component, s := image.NewGray(image.Rect(0, 0, cwidth, cheight)), 0
 		for y := 0; y < cheight; y++ {
 			for x := 0; x < cwidth; x++ {
-				component.SetGray(x, y, color.Gray{uint8(set[s])})
+				component.SetGray(x, y, color.Gray{set[s]})
+				set[s] >>= quantization
 				s++
 			}
 		}
@@ -237,7 +238,10 @@ func main() {
 			log.Fatal(err)
 		}
 		file.Close()
+	}
 
+	totalUncompressed, totalCompressed := 0, 0
+	for _, set := range output {
 		totalUncompressed += len(set)
 		pressed := press(bytes.NewBuffer(set))
 		totalCompressed += pressed.Len()
