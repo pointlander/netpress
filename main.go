@@ -142,7 +142,17 @@ func main() {
 		j := i + int(rand.Float64()*float64(size-i))
 		randomPatterns[i], randomPatterns[j] = randomPatterns[j], randomPatterns[i]
 	}
-	net.TrainQuant(randomPatterns, 10, 0.6, 0.4, false, quantization)
+	config := func(context *gobrain.Context32) *gobrain.Context32 {
+		mask := uint8(0xFF)
+		mask <<= quantization
+		hidden := context.Activations[0]
+		context.Activations[0] = func(x float32) float32 {
+			x = hidden(x)
+			return float32(uint8(x*255)&mask) / 255
+		}
+		return context
+	}
+	net.TrainWithConfig(randomPatterns, config)
 
 	type Stat struct {
 		sum, min, max float32
