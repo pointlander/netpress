@@ -13,6 +13,7 @@ import (
 	"image/png"
 	"log"
 	"math"
+	"math/rand"
 	"os"
 	"strings"
 
@@ -26,7 +27,8 @@ const (
 	testImage    = "images/image01.png"
 	blockSize    = 4
 	netWidth     = blockSize * blockSize
-	hiddens      = netWidth / 4
+	hiddens      = netWidth / 2
+	hiddenLayer  = 2
 	quantization = 4
 	scale        = 1
 )
@@ -118,11 +120,11 @@ func main() {
 	file.Close()
 
 	config := func(n *neural.Neural32) {
-		n.Init(neural.WeightInitializer32FanIn, netWidth, hiddens, netWidth)
-		mask := uint8(0xFF)
+		n.Init(neural.WeightInitializer32FanIn, netWidth, netWidth, hiddens, netWidth, netWidth)
+		mask, layer := uint8(0xFF), hiddenLayer-1
 		mask <<= quantization
-		hidden := n.Functions[0].F
-		n.Functions[0].F = func(x float32) float32 {
+		hidden := n.Functions[layer].F
+		n.Functions[layer].F = func(x float32) float32 {
 			x = hidden(x)
 			return float32(uint8(x*255)&mask) / 255
 		}
@@ -144,7 +146,16 @@ func main() {
 			c++
 		}
 	}
-	codec.Train(patterns, 10, 0.6, 0.4)
+	randomized := make([][][]float32, size)
+	copy(randomized, patterns)
+	source := func(iterations int) [][][]float32 {
+		for i := 0; i < size; i++ {
+			j := i + rand.Intn(size-i)
+			randomized[i], randomized[j] = randomized[j], randomized[i]
+		}
+		return randomized
+	}
+	codec.Train(source, 10, 0.6, 0.4)
 	context := codec.NewContext()
 
 	type Stat struct {
@@ -165,7 +176,7 @@ func main() {
 			context.SetInput(pattern[0])
 			context.Infer()
 			outputs, o := context.GetOutput(), 0
-			for k, act := range context.Activations[1][:hiddens] {
+			for k, act := range context.Activations[hiddenLayer][:hiddens] {
 				stats[k].sum += act
 				if act < stats[k].min {
 					stats[k].min = act
@@ -214,7 +225,7 @@ func main() {
 
 			context.SetInput(pattern[0])
 			context.Infer()
-			for k, act := range context.Activations[1][:hiddens] {
+			for k, act := range context.Activations[hiddenLayer][:hiddens] {
 				min, max := stats[k].min, stats[k].max
 				output[k][c] = uint8(255 * (act - min) / (max - min))
 			}
@@ -255,11 +266,11 @@ func main() {
 
 	decoded := image.NewGray16(input.Bounds())
 	config = func(n *neural.Neural32) {
-		n.Init(neural.WeightInitializer32FanIn, hiddens, netWidth)
+		n.Init(neural.WeightInitializer32FanIn, hiddens, netWidth, netWidth)
 		for l := range n.Weights {
 			for i := range n.Weights[l] {
 				for j := range n.Weights[l][i] {
-					n.Weights[l][i][j] = codec.Weights[l+1][i][j]
+					n.Weights[l][i][j] = codec.Weights[hiddenLayer+l][i][j]
 				}
 			}
 		}
@@ -290,7 +301,7 @@ func main() {
 		}
 	}
 
-	g = gift.New(
+	/*g = gift.New(
 		gift.Convolution(
 			[]float32{
 				1.0 / 9.0, 1.0 / 9.0, 1.0 / 9.0,
@@ -301,14 +312,14 @@ func main() {
 		),
 	)
 	filtered := image.NewGray16(input.Bounds())
-	g.Draw(filtered, decoded)
+	g.Draw(filtered, decoded)*/
 
 	file, err = os.Create(name + "_decoded.png")
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	err = png.Encode(file, filtered)
+	err = png.Encode(file, decoded)
 	if err != nil {
 		log.Fatal(err)
 	}
