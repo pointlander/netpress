@@ -155,7 +155,8 @@ func main() {
 		}
 		return randomized
 	}
-	codec.Train(source, 10, 0.6, 0.4)
+	errors := codec.Train(source, 10, 0.6, 0.4)
+	fmt.Println(errors)
 	context := codec.NewContext()
 
 	type Stat struct {
