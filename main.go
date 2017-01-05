@@ -27,11 +27,81 @@ const (
 	testImage    = "images/image01.png"
 	blockSize    = 4
 	netWidth     = blockSize * blockSize
-	hiddens      = netWidth / 2
-	hiddenLayer  = 2
-	quantization = 4
+	hiddens      = netWidth / 4
+	hiddenLayer  = 1
+	quantization = 0
 	scale        = 1
 )
+
+var (
+	c, cT [blockSize * blockSize]float32
+)
+
+func init() {
+	n := float64(blockSize)
+
+	for j := 0; j < blockSize; j++ {
+		c[0*blockSize+j] = 1.0 / float32(math.Sqrt(n))
+		cT[j*blockSize+0] = c[0*blockSize+j]
+	}
+
+	for i := 1; i < blockSize; i++ {
+		for j := 0; j < blockSize; j++ {
+			jj, ii := float64(j), float64(i)
+			c[i*blockSize+j] = float32(math.Sqrt(2.0/n) * math.Cos(((2.0*jj+1.0)*ii*math.Pi)/(2.0*n)))
+			cT[j*blockSize+i] = c[i*blockSize+j]
+		}
+	}
+}
+
+func dct(in, out []float32) {
+	var x [blockSize * blockSize]float32
+	for i := 0; i < blockSize; i++ {
+		for j := 0; j < blockSize; j++ {
+			for k := 0; k < blockSize; k++ {
+				x[i*blockSize+j] += (in[i*blockSize+k] - 0.5) * cT[k*blockSize+j]
+			}
+		}
+	}
+
+	for i := 0; i < blockSize; i++ {
+		for j := 0; j < blockSize; j++ {
+			var y float32
+			for k := 0; k < blockSize; k++ {
+				y += c[i*blockSize+k] * x[k*blockSize+j]
+			}
+			out[i*blockSize+j] = y
+		}
+	}
+}
+
+func idct(in, out []float32) {
+	var x [blockSize * blockSize]float32
+	for i := 0; i < blockSize; i++ {
+		for j := 0; j < blockSize; j++ {
+			for k := 0; k < blockSize; k++ {
+				x[i*blockSize+j] += in[i*blockSize+k] * c[k*blockSize+j]
+			}
+		}
+	}
+
+	for i := 0; i < blockSize; i++ {
+		for j := 0; j < blockSize; j++ {
+			var y float32
+			for k := 0; k < blockSize; k++ {
+				y += cT[i*blockSize+k] * x[k*blockSize+j]
+			}
+			y += .5
+			if y < 0 {
+				out[i*blockSize+j] = 0
+			} else if y > 1 {
+				out[i*blockSize+j] = 1
+			} else {
+				out[i*blockSize+j] = y
+			}
+		}
+	}
+}
 
 func Gray(input image.Image) *image.Gray16 {
 	bounds := input.Bounds()
@@ -61,6 +131,30 @@ func unpress(input *bytes.Buffer, size int) *bytes.Buffer {
 	close(in)
 	compress.BijectiveBurrowsWheelerDecoder(in).MoveToFrontRunLengthDecoder().AdaptiveDecoder().Decode(input)
 	return bytes.NewBuffer(data)
+}
+
+type Stat struct {
+	sum, avg, min, max float32
+	count              int
+}
+
+func (s *Stat) Init() {
+	s.min = math.MaxFloat32
+}
+
+func (s *Stat) Aggregate(a float32) {
+	s.sum += a
+	if a < s.min {
+		s.min = a
+	}
+	if a > s.max {
+		s.max = a
+	}
+	s.count++
+}
+
+func (s *Stat) Compute() {
+	s.avg = s.sum / float32(s.count)
 }
 
 func main() {
@@ -120,7 +214,7 @@ func main() {
 	file.Close()
 
 	config := func(n *neural.Neural32) {
-		n.Init(neural.WeightInitializer32FanIn, netWidth, netWidth, hiddens, netWidth, netWidth)
+		n.Init(neural.WeightInitializer32FanIn, netWidth, hiddens, netWidth)
 		mask, layer := uint8(0xFF), hiddenLayer-1
 		mask <<= quantization
 		hidden := n.Functions[layer].F
@@ -131,6 +225,7 @@ func main() {
 	}
 	codec := neural.NewNeural32(config)
 
+	dctImage, out := image.NewGray(bounds), make([]float32, netWidth)
 	patterns, c := make([][][]float32, size), 0
 	for j := 0; j < height; j += blockSize {
 		for i := 0; i < width; i += blockSize {
@@ -142,10 +237,54 @@ func main() {
 					p++
 				}
 			}
+			dct(pixels, out)
+			copy(pixels, out)
+
+			idct(pixels, out)
+			p = 0
+			for y := 0; y < blockSize; y++ {
+				for x := 0; x < blockSize; x++ {
+					dctImage.SetGray(i+x, j+y, color.Gray{uint8(out[p] * 0xFF)})
+					p++
+				}
+			}
+
 			patterns[c] = [][]float32{pixels, pixels}
 			c++
 		}
 	}
+
+	file, err = os.Create(name + "_dct.png")
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	err = png.Encode(file, dctImage)
+	if err != nil {
+		log.Fatal(err)
+	}
+	file.Close()
+
+	dctStats := make([]Stat, netWidth)
+	for i := range dctStats {
+		dctStats[i].Init()
+	}
+	for _, pattern := range patterns {
+		for i, d := range pattern[0] {
+			dctStats[i].Aggregate(d)
+		}
+	}
+	for i := range dctStats {
+		dctStats[i].Compute()
+	}
+	fmt.Println(dctStats)
+	for _, pattern := range patterns {
+		for i, d := range pattern[0] {
+			min, max := dctStats[i].min, dctStats[i].max
+			pattern[0][i] = (d - min) / (max - min)
+		}
+	}
+
 	randomized := make([][][]float32, size)
 	copy(randomized, patterns)
 	source := func(iterations int) [][][]float32 {
@@ -159,12 +298,9 @@ func main() {
 	fmt.Println(errors)
 	context := codec.NewContext()
 
-	type Stat struct {
-		sum, min, max float32
-	}
 	stats := make([]Stat, hiddens)
 	for i := range stats {
-		stats[i].min = math.MaxFloat32
+		stats[i].Init()
 	}
 
 	coded := image.NewGray16(input.Bounds())
@@ -178,18 +314,17 @@ func main() {
 			context.Infer()
 			outputs, o := context.GetOutput(), 0
 			for k, act := range context.Activations[hiddenLayer][:hiddens] {
-				stats[k].sum += act
-				if act < stats[k].min {
-					stats[k].min = act
-				}
-				if act > stats[k].max {
-					stats[k].max = act
-				}
+				stats[k].Aggregate(act)
 			}
 
+			for k := range outputs {
+				min, max := dctStats[k].min, dctStats[k].max
+				outputs[k] = outputs[k]*(max-min) + min
+			}
+			idct(outputs, out)
 			for y := 0; y < blockSize; y++ {
 				for x := 0; x < blockSize; x++ {
-					coded.SetGray16(i+x, j+y, color.Gray16{uint16(outputs[o]*0xFFFF + .5)})
+					coded.SetGray16(i+x, j+y, color.Gray16{uint16(out[o]*0xFFFF + .5)})
 					o++
 				}
 			}
@@ -199,7 +334,7 @@ func main() {
 	}
 
 	for i := range stats {
-		stats[i].sum /= float32(len(patterns))
+		stats[i].Compute()
 	}
 	fmt.Println(stats)
 
@@ -266,8 +401,9 @@ func main() {
 	fmt.Println(totalCompressed, float64(totalCompressed)/float64(totalUncompressed))
 
 	decoded := image.NewGray16(input.Bounds())
+	//decodedDCT := image.NewGray16(input.Bounds())
 	config = func(n *neural.Neural32) {
-		n.Init(neural.WeightInitializer32FanIn, hiddens, netWidth, netWidth)
+		n.Init(neural.WeightInitializer32FanIn, hiddens, netWidth)
 		for l := range n.Weights {
 			for i := range n.Weights[l] {
 				for j := range n.Weights[l][i] {
@@ -291,16 +427,45 @@ func main() {
 			context.SetInput(pattern)
 			context.Infer()
 			outputs, o := context.GetOutput(), 0
+			for k := range outputs {
+				min, max := dctStats[k].min, dctStats[k].max
+				outputs[k] = outputs[k]*(max-min) + min
+			}
+			idct(outputs, out)
 			for y := 0; y < blockSize; y++ {
 				for x := 0; x < blockSize; x++ {
-					decoded.SetGray16(i+x, j+y, color.Gray16{uint16(outputs[o]*0xFFFF + .5)})
+					decoded.SetGray16(i+x, j+y, color.Gray16{uint16(out[o]*0xFFFF + .5)})
 					o++
 				}
 			}
 
+			/*o = 0
+			idct(outputs[netWidth:], out)
+			for k := range out {
+				min, max := dctStats[k].min, dctStats[k].max
+				out[k] = out[k]*(max-min) + min
+			}
+			for y := 0; y < blockSize; y++ {
+				for x := 0; x < blockSize; x++ {
+					decodedDCT.SetGray16(i+x, j+y, color.Gray16{uint16(out[o]*0xFFFF + .5)})
+					o++
+				}
+			}*/
+
 			c++
 		}
 	}
+
+	/*file, err = os.Create(name + "_decoded_dct.png")
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	err = png.Encode(file, decodedDCT)
+	if err != nil {
+		log.Fatal(err)
+	}
+	file.Close()*/
 
 	/*g = gift.New(
 		gift.Convolution(
