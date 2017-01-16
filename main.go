@@ -157,7 +157,19 @@ func main() {
 	}
 	errors := codec.Train(source, 10, 0.6, 0.4)
 	fmt.Println(errors)
-	context := codec.NewContext()
+
+	config = func(n *neural.Neural32) {
+		n.Init(neural.WeightInitializer32FanIn, netWidth, netWidth, hiddens, netWidth, netWidth)
+		for l := range n.Weights {
+			for i := range n.Weights[l] {
+				for j := range n.Weights[l][i] {
+					n.Weights[l][i][j] = codec.Weights[l][i][j]
+				}
+			}
+		}
+	}
+	coder := neural.NewNeural32(config)
+	context := coder.NewContext()
 
 	type Stat struct {
 		sum, min, max float32
