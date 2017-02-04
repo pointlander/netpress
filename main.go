@@ -20,14 +20,15 @@ import (
 	"github.com/disintegration/gift"
 	"github.com/nfnt/resize"
 	"github.com/pointlander/compress"
-	"github.com/pointlander/gobrain"
+	"github.com/pointlander/neural"
 )
 
 const (
 	testImage    = "images/image01.png"
 	blockSize    = 4
 	netWidth     = blockSize * blockSize
-	hiddens      = netWidth / 4
+	hiddens      = netWidth / 2
+	hiddenLayer  = 2
 	quantization = 4
 	scale        = 1
 )
@@ -118,8 +119,17 @@ func main() {
 	}
 	file.Close()
 
-	net := &gobrain.FeedForward32{}
-	net.Init(netWidth, hiddens, netWidth)
+	config := func(n *neural.Neural32) {
+		n.Init(neural.WeightInitializer32FanIn, netWidth, netWidth, hiddens, netWidth, netWidth)
+		mask, layer := uint8(0xFF), hiddenLayer-1
+		mask <<= quantization
+		hidden := n.Functions[layer].F
+		n.Functions[layer].F = func(x float32) float32 {
+			x = hidden(x)
+			return float32(uint8(x*255)&mask) / 255
+		}
+	}
+	codec := neural.NewNeural32(config)
 
 	patterns, c := make([][][]float32, size), 0
 	for j := 0; j < height; j += blockSize {
@@ -136,23 +146,30 @@ func main() {
 			c++
 		}
 	}
-	randomPatterns := make([][][]float32, size)
-	copy(randomPatterns, patterns)
-	for i := 0; i < size; i++ {
-		j := i + int(rand.Float64()*float64(size-i))
-		randomPatterns[i], randomPatterns[j] = randomPatterns[j], randomPatterns[i]
-	}
-	config := func(context *gobrain.Context32) *gobrain.Context32 {
-		mask := uint8(0xFF)
-		mask <<= quantization
-		hidden := context.Activations[0]
-		context.Activations[0] = func(x float32) float32 {
-			x = hidden(x)
-			return float32(uint8(x*255)&mask) / 255
+	randomized := make([][][]float32, size)
+	copy(randomized, patterns)
+	source := func(iterations int) [][][]float32 {
+		for i := 0; i < size; i++ {
+			j := i + rand.Intn(size-i)
+			randomized[i], randomized[j] = randomized[j], randomized[i]
 		}
-		return context
+		return randomized
 	}
-	net.TrainWithConfig(randomPatterns, config)
+	errors := codec.Train(source, 10, 0.6, 0.4)
+	fmt.Println(errors)
+
+	config = func(n *neural.Neural32) {
+		n.Init(neural.WeightInitializer32FanIn, netWidth, netWidth, hiddens, netWidth, netWidth)
+		for l := range n.Weights {
+			for i := range n.Weights[l] {
+				for j := range n.Weights[l][i] {
+					n.Weights[l][i][j] = codec.Weights[l][i][j]
+				}
+			}
+		}
+	}
+	coder := neural.NewNeural32(config)
+	context := coder.NewContext()
 
 	type Stat struct {
 		sum, min, max float32
@@ -169,8 +186,10 @@ func main() {
 		for i := 0; i < width; i += blockSize {
 			pattern := patterns[c]
 
-			outputs, o := net.Update(pattern[0]), 0
-			for k, act := range net.HiddenActivations[:hiddens] {
+			context.SetInput(pattern[0])
+			context.Infer()
+			outputs, o := context.GetOutput(), 0
+			for k, act := range context.Activations[hiddenLayer][:hiddens] {
 				stats[k].sum += act
 				if act < stats[k].min {
 					stats[k].min = act
@@ -217,8 +236,9 @@ func main() {
 		for i := 0; i < width; i += blockSize {
 			pattern := patterns[c]
 
-			net.Update(pattern[0])
-			for k, act := range net.HiddenActivations[:hiddens] {
+			context.SetInput(pattern[0])
+			context.Infer()
+			for k, act := range context.Activations[hiddenLayer][:hiddens] {
 				min, max := stats[k].min, stats[k].max
 				output[k][c] = uint8(255 * (act - min) / (max - min))
 			}
@@ -258,6 +278,18 @@ func main() {
 	fmt.Println(totalCompressed, float64(totalCompressed)/float64(totalUncompressed))
 
 	decoded := image.NewGray16(input.Bounds())
+	config = func(n *neural.Neural32) {
+		n.Init(neural.WeightInitializer32FanIn, hiddens, netWidth, netWidth)
+		for l := range n.Weights {
+			for i := range n.Weights[l] {
+				for j := range n.Weights[l][i] {
+					n.Weights[l][i][j] = codec.Weights[hiddenLayer+l][i][j]
+				}
+			}
+		}
+	}
+	decoder := neural.NewNeural32(config)
+	context = decoder.NewContext()
 
 	c = 0
 	pattern := make([]float32, hiddens)
@@ -268,7 +300,9 @@ func main() {
 				pattern[k] = float32(output[k][c]<<quantization)*(max-min)/255 + min
 			}
 
-			outputs, o := net.HalfUpdate(pattern), 0
+			context.SetInput(pattern)
+			context.Infer()
+			outputs, o := context.GetOutput(), 0
 			for y := 0; y < blockSize; y++ {
 				for x := 0; x < blockSize; x++ {
 					decoded.SetGray16(i+x, j+y, color.Gray16{uint16(outputs[o]*0xFFFF + .5)})
@@ -280,7 +314,7 @@ func main() {
 		}
 	}
 
-	g = gift.New(
+	/*g = gift.New(
 		gift.Convolution(
 			[]float32{
 				1.0 / 9.0, 1.0 / 9.0, 1.0 / 9.0,
@@ -291,14 +325,14 @@ func main() {
 		),
 	)
 	filtered := image.NewGray16(input.Bounds())
-	g.Draw(filtered, decoded)
+	g.Draw(filtered, decoded)*/
 
 	file, err = os.Create(name + "_decoded.png")
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	err = png.Encode(file, filtered)
+	err = png.Encode(file, decoded)
 	if err != nil {
 		log.Fatal(err)
 	}
