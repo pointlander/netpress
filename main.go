@@ -26,10 +26,10 @@ import (
 const (
 	testImage    = "images/image01.png"
 	blockSize    = 4
-	netWidth     = blockSize * blockSize
-	hiddens      = netWidth / 2
+	netWidth     = 3 * blockSize * blockSize
+	hiddens      = netWidth / (3 * 4)
 	hiddenLayer  = 2
-	quantization = 4
+	quantization = 2
 	scale        = 1
 )
 
@@ -91,11 +91,11 @@ func main() {
 	g := gift.New(
 		gift.Crop(bounds),
 	)
-	cropped := image.NewGray16(bounds)
+	cropped := image.NewRGBA64(bounds)
 	g.Draw(cropped, input)
-	input = Gray(cropped)
+	input = cropped
 
-	size := width * height / netWidth
+	size := width * height / (blockSize * blockSize)
 
 	file, err = os.Create(name + ".png")
 	if err != nil {
@@ -137,8 +137,12 @@ func main() {
 			pixels, p := make([]float32, netWidth), 0
 			for y := 0; y < blockSize; y++ {
 				for x := 0; x < blockSize; x++ {
-					pixel, _, _, _ := input.At(i+x, j+y).RGBA()
-					pixels[p] = float32(pixel) / 0xFFFF
+					r, g, b, _ := input.At(i+x, j+y).RGBA()
+					pixels[p] = float32(r) / 0xFFFF
+					p++
+					pixels[p] = float32(g) / 0xFFFF
+					p++
+					pixels[p] = float32(b) / 0xFFFF
 					p++
 				}
 			}
@@ -179,7 +183,7 @@ func main() {
 		stats[i].min = math.MaxFloat32
 	}
 
-	coded := image.NewGray16(input.Bounds())
+	coded := image.NewRGBA64(input.Bounds())
 
 	c = 0
 	for j := 0; j < height; j += blockSize {
@@ -201,8 +205,14 @@ func main() {
 
 			for y := 0; y < blockSize; y++ {
 				for x := 0; x < blockSize; x++ {
-					coded.SetGray16(i+x, j+y, color.Gray16{uint16(outputs[o]*0xFFFF + .5)})
-					o++
+					pix := color.RGBA64{
+						R: uint16(outputs[o]*0xFFFF + .5),
+						G: uint16(outputs[o+1]*0xFFFF + .5),
+						B: uint16(outputs[o+2]*0xFFFF + .5),
+						A: 0xFFFF,
+					}
+					coded.SetRGBA64(i+x, j+y, pix)
+					o += 3
 				}
 			}
 
@@ -277,7 +287,7 @@ func main() {
 	}
 	fmt.Println(totalCompressed, float64(totalCompressed)/float64(totalUncompressed))
 
-	decoded := image.NewGray16(input.Bounds())
+	decoded := image.NewRGBA64(input.Bounds())
 	config = func(n *neural.Neural32) {
 		n.Init(neural.WeightInitializer32FanIn, hiddens, netWidth, netWidth)
 		for l := range n.Weights {
@@ -305,8 +315,14 @@ func main() {
 			outputs, o := context.GetOutput(), 0
 			for y := 0; y < blockSize; y++ {
 				for x := 0; x < blockSize; x++ {
-					decoded.SetGray16(i+x, j+y, color.Gray16{uint16(outputs[o]*0xFFFF + .5)})
-					o++
+					pix := color.RGBA64{
+						R: uint16(outputs[o]*0xFFFF + .5),
+						G: uint16(outputs[o+1]*0xFFFF + .5),
+						B: uint16(outputs[o+2]*0xFFFF + .5),
+						A: 0xFFFF,
+					}
+					decoded.SetRGBA64(i+x, j+y, pix)
+					o += 3
 				}
 			}
 
